@@ -1,0 +1,76 @@
+name: Nginx ASG Deployment (S3 + SSM Tags)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # S3 업로드
+      - name: Upload to S3
+        run: |
+          aws s3 cp ./nginx/default.conf s3://${{ secrets.S3_BUCKET_NAME }}/config/default.conf
+          aws s3 sync ./nginx/html/ s3://${{ secrets.S3_BUCKET_NAME }}/html/ --delete
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build ./nginx \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:nginx-$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:nginx-latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:nginx-$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:nginx-latest
+
+      - name: Deploy to ASG via SSM Tags
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPO: ${{ secrets.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ASC_TAG_KEY: ${{ secrets.ASC_TAG_KEY }}      # ASG 태그 키
+          ASC_TAG_VALUE: ${{ secrets.ASG_TAG_VALUE }}  # ASG 태그 값
+        run: |
+          aws ssm send-command \
+            --targets "Key=tag:$ASC_TAG_KEY,Values=$ASC_TAG_VALUE" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Nginx S3 deploy $TAG" \
+            --parameters "commands=[
+              'sudo mkdir -p /home/ubuntu/app/html',
+              'aws s3 cp s3://$S3_BUCKET/config/default.conf /home/ubuntu/app/default.conf',
+              'aws s3 sync s3://$S3_BUCKET/html/ /home/ubuntu/app/html/ --delete',
+              'aws ecr get-login-password --region $AWS_REGION | sudo docker login --username AWS --password-stdin $REGISTRY',
+              'sudo docker pull $REGISTRY/$REPO:nginx-$TAG',
+              'sudo docker stop nginx-server || true',
+              'sudo docker rm nginx-server || true',
+              'sudo docker run -d --name nginx-server -p 80:80 \\
+                -v /home/ubuntu/app/default.conf:/etc/nginx/conf.d/default.conf \\
+                -v /home/ubuntu/app/html:/usr/share/nginx/html \\
+                $REGISTRY/$REPO:nginx-$TAG',
+              'sudo docker image prune -f'
+            ]" \
+            --region $AWS_REGION
