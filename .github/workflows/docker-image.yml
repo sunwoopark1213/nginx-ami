@@ -34,9 +34,9 @@ jobs:
       - name: Upload Config and Assets to S3
         run: |
           # default.conf 파일을 S3의 config 폴더로 복사합니다.
-          aws s3 cp ./nginx/default.conf s3://${{ secrets.S3_BUCKET_NAME }}/config/default.conf
+          aws s3 cp ./nginx-ami/nginx/default.conf s3://${{ secrets.S3_BUCKET_NAME }}/config/default.conf
           # html 폴더 전체를 S3의 html 폴더와 동기화합니다. (--delete는 로컬에 없는 파일은 S3에서도 삭제)
-          aws s3 sync ./html/ s3://${{ secrets.S3_BUCKET_NAME }}/html/ --delete
+          aws s3 sync ./nginx-ami/nginx/html/ s3://${{ secrets.S3_BUCKET_NAME }}/html/ --delete
 
       # 4단계: Docker 이미지를 저장할 ECR 리포지토리에 로그인합니다.
       - name: Login to Amazon ECR
